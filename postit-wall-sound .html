@@ -1,0 +1,359 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<title>The Wall</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Caveat:wght@600;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --note-size: 88px;
+  }
+  *{ box-sizing:border-box; -webkit-tap-highlight-color:transparent; user-select:none; -webkit-user-select:none; }
+  html,body{
+    margin:0; padding:0; width:100%; height:100%;
+    overflow:hidden; position:fixed; inset:0;
+    background:#000;
+    font-family:'JetBrains Mono', monospace;
+  }
+
+  #wall{
+    position:fixed; inset:0;
+    background:
+      radial-gradient(ellipse 120% 80% at 50% 30%, #171717 0%, #0a0a0a 55%, #020202 100%);
+    touch-action:none;
+    overflow:hidden;
+  }
+
+  #grain{
+    position:absolute; inset:-50%;
+    width:200%; height:200%;
+    opacity:0.05;
+    mix-blend-mode:overlay;
+    pointer-events:none;
+    background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  }
+
+  /* ---- HUD ---- */
+  #counter{
+    position:fixed; top:max(16px, env(safe-area-inset-top)); left:16px;
+    color:rgba(255,255,255,0.38);
+    font-size:11px; letter-spacing:0.15em; font-weight:600;
+    z-index:500; pointer-events:none;
+    text-transform:uppercase;
+  }
+  #counter b{ color:rgba(255,255,255,0.72); font-size:13px; letter-spacing:0.05em; }
+
+  #reset{
+    position:fixed; top:max(14px, env(safe-area-inset-top)); right:14px;
+    z-index:500;
+    background:transparent; border:1px solid rgba(255,255,255,0.15);
+    color:rgba(255,255,255,0.35);
+    font-family:'JetBrains Mono', monospace;
+    font-size:10px; letter-spacing:0.1em; text-transform:uppercase;
+    padding:7px 10px; border-radius:20px;
+    cursor:pointer;
+  }
+  #reset:active{ background:rgba(255,255,255,0.08); color:rgba(255,255,255,0.6); }
+
+  /* ---- shelf glow under the pad ---- */
+  #shelf{
+    position:fixed; left:50%; bottom:max(14px, env(safe-area-inset-bottom));
+    width:180px; height:14px;
+    transform:translateX(-50%);
+    background:radial-gradient(ellipse at center, rgba(255,255,255,0.10), transparent 70%);
+    z-index:60; pointer-events:none;
+  }
+
+  /* ---- notes ---- */
+  .note{
+    position:absolute;
+    width:var(--note-size); height:var(--note-size);
+    background:
+      linear-gradient(155deg, rgba(255,255,255,0.16), rgba(0,0,0,0.05)),
+      var(--c);
+    border-radius:2px;
+    box-shadow:0 3px 8px rgba(0,0,0,0.45);
+    will-change:transform, left, top;
+  }
+  .note::after{
+    content:"";
+    position:absolute; right:0; bottom:0;
+    width:16px; height:16px;
+    background:linear-gradient(315deg, rgba(0,0,0,0.22) 50%, transparent 51%);
+  }
+  .note .num{
+    position:absolute; right:6px; bottom:3px;
+    font-family:'Caveat', cursive; font-weight:700;
+    font-size:15px; color:rgba(0,0,0,0.32);
+    pointer-events:none;
+  }
+  .tray-note{ cursor:grab; }
+  .tray-note.dragging{
+    cursor:grabbing;
+    box-shadow:0 18px 30px rgba(0,0,0,0.55);
+  }
+  .placed{ cursor:default; }
+</style>
+</head>
+<body>
+
+<div id="wall">
+  <div id="grain"></div>
+</div>
+<div id="shelf"></div>
+<div id="counter">On the wall &middot; <b id="count">000</b></div>
+<button id="reset">Clear</button>
+
+<script>
+(function(){
+  const wall = document.getElementById('wall');
+  const countEl = document.getElementById('count');
+  const resetBtn = document.getElementById('reset');
+
+  const COLORS = ['#F5E663','#FF8FA3','#7FD1E0','#A8E6A1','#FFB86B','#C9A9E0'];
+  const NOTE_SIZE = 88;
+  const SLOT_DX = [0, 7, 13, 18];
+  const SLOT_DY = [0, 5, 9, 12];
+  const SLOT_ROT = [-3, 5, -6, 4];
+  const SLOT_SCALE = [1, 0.95, 0.9, 0.85];
+  const SLOT_OPACITY = [1, 0.97, 0.9, 0.8];
+  const SLOT_Z = [40, 30, 20, 10];
+
+  let idCounter = 0;
+  let placedCount = 0;
+  let zTop = 100;
+  let queue = []; // {id, color, el}
+  let trayBase = { x:0, y:0 };
+
+  // ---- Peel sound (synthesized, no audio file needed) ----
+  let audioCtx = null;
+  function ensureAudio(){
+    if (!audioCtx){
+      const Ctx = window.AudioContext || window.webkitAudioContext;
+      if (!Ctx) return;
+      audioCtx = new Ctx();
+    }
+    if (audioCtx.state === 'suspended') audioCtx.resume();
+  }
+  function playPeelSound(){
+    if (!audioCtx) return;
+    const ctx = audioCtx;
+    const dur = 0.26;
+    const bufferSize = Math.floor(ctx.sampleRate * dur);
+    const buffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
+    const data = buffer.getChannelData(0);
+    for (let i = 0; i < bufferSize; i++){
+      // noise with slight decay so tail isn't harsh
+      data[i] = (Math.random()*2 - 1) * (1 - i/bufferSize)**0.6;
+    }
+    const noise = ctx.createBufferSource();
+    noise.buffer = buffer;
+
+    const band = ctx.createBiquadFilter();
+    band.type = 'bandpass';
+    band.Q.value = 5;
+    band.frequency.setValueAtTime(1600, ctx.currentTime);
+    band.frequency.exponentialRampToValueAtTime(3200, ctx.currentTime + dur*0.55);
+    band.frequency.exponentialRampToValueAtTime(700, ctx.currentTime + dur);
+
+    const gain = ctx.createGain();
+    gain.gain.setValueAtTime(0.0001, ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.45, ctx.currentTime + 0.015);
+    gain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + dur);
+
+    noise.connect(band);
+    band.connect(gain);
+    gain.connect(ctx.destination);
+    noise.start();
+    noise.stop(ctx.currentTime + dur + 0.02);
+  }
+
+  function pickColor(exclude){
+    let c;
+    do { c = COLORS[Math.floor(Math.random()*COLORS.length)]; } while (c === exclude);
+    return c;
+  }
+
+  function computeTrayBase(){
+    trayBase.x = window.innerWidth/2 - NOTE_SIZE/2;
+    trayBase.y = window.innerHeight - 14 - NOTE_SIZE - 8; // sits just above shelf
+  }
+
+  function slotTransform(i){
+    return `rotate(${SLOT_ROT[i]}deg) scale(${SLOT_SCALE[i]})`;
+  }
+
+  function layoutSlot(item, i, animate){
+    const el = item.el;
+    el.style.transition = animate ? 'left 320ms cubic-bezier(.22,.9,.32,1), top 320ms cubic-bezier(.22,.9,.32,1), transform 320ms cubic-bezier(.22,.9,.32,1), opacity 320ms ease' : 'none';
+    el.style.left = (trayBase.x + SLOT_DX[i]) + 'px';
+    el.style.top = (trayBase.y + SLOT_DY[i]) + 'px';
+    el.style.transform = slotTransform(i);
+    el.style.opacity = SLOT_OPACITY[i];
+    el.style.zIndex = SLOT_Z[i];
+  }
+
+  function createTrayNote(color){
+    const el = document.createElement('div');
+    el.className = 'note tray-note';
+    el.style.setProperty('--c', color);
+    el.style.width = NOTE_SIZE + 'px';
+    el.style.height = NOTE_SIZE + 'px';
+    wall.appendChild(el);
+    el.addEventListener('pointerdown', onPointerDown);
+    el.addEventListener('contextmenu', e => e.preventDefault());
+    return el;
+  }
+
+  function refillQueue(){
+    while (queue.length < 4){
+      const prevColor = queue.length ? queue[queue.length-1].color : null;
+      const color = pickColor(prevColor);
+      const item = { id: ++idCounter, color, el: null };
+      item.el = createTrayNote(color);
+      queue.push(item);
+    }
+  }
+
+  function redrawTray(animate){
+    queue.forEach((item, i) => layoutSlot(item, i, animate));
+  }
+
+  function initTray(){
+    computeTrayBase();
+    refillQueue();
+    redrawTray(false);
+  }
+
+  // ---- Dragging ----
+  let dragging = null;
+  let grabOffsetX = 0, grabOffsetY = 0;
+  let trayRect = null;
+
+  function onPointerDown(e){
+    const el = e.currentTarget;
+    if (!queue.length || queue[0].el !== el) return; // only front note is draggable
+    ensureAudio();
+    dragging = queue[0];
+    el.setPointerCapture(e.pointerId);
+    el.classList.add('dragging');
+    el.style.transition = 'none';
+    el.style.zIndex = 1000;
+
+    const curLeft = parseFloat(el.style.left);
+    const curTop = parseFloat(el.style.top);
+    grabOffsetX = e.clientX - curLeft;
+    grabOffsetY = e.clientY - curTop;
+
+    // cache tray drop-zone bounds
+    trayRect = {
+      left: trayBase.x - 24,
+      top: trayBase.y - 24,
+      right: trayBase.x + NOTE_SIZE + 24,
+      bottom: trayBase.y + NOTE_SIZE + 24
+    };
+
+    el.addEventListener('pointermove', onPointerMove);
+    el.addEventListener('pointerup', onPointerUp);
+    el.addEventListener('pointercancel', onPointerUp);
+  }
+
+  function onPointerMove(e){
+    if (!dragging) return;
+    const el = dragging.el;
+    const nx = e.clientX - grabOffsetX;
+    const ny = e.clientY - grabOffsetY;
+    el.style.left = nx + 'px';
+    el.style.top = ny + 'px';
+  }
+
+  function onPointerUp(e){
+    if (!dragging) return;
+    const item = dragging;
+    const el = item.el;
+    el.removeEventListener('pointermove', onPointerMove);
+    el.removeEventListener('pointerup', onPointerUp);
+    el.removeEventListener('pointercancel', onPointerUp);
+    el.classList.remove('dragging');
+
+    const x = e.clientX, y = e.clientY;
+    const overTray = x >= trayRect.left && x <= trayRect.right && y >= trayRect.top && y <= trayRect.bottom;
+
+    if (overTray){
+      snapBack(item);
+    } else {
+      placeOnWall(item, x, y);
+    }
+    dragging = null;
+  }
+
+  function snapBack(item){
+    const el = item.el;
+    requestAnimationFrame(() => {
+      el.style.transition = 'left 260ms cubic-bezier(.34,1.2,.64,1), top 260ms cubic-bezier(.34,1.2,.64,1), transform 260ms ease';
+      layoutSlot(item, 0, true);
+    });
+  }
+
+  function placeOnWall(item, x, y){
+    const el = item.el;
+    const rot = (Math.random()*24 - 12);
+    const left = Math.min(Math.max(x - NOTE_SIZE/2, -NOTE_SIZE*0.2), window.innerWidth - NOTE_SIZE*0.8);
+    const top = Math.min(Math.max(y - NOTE_SIZE/2, 8), window.innerHeight - NOTE_SIZE - 8);
+
+    el.classList.remove('tray-note');
+    el.classList.add('placed');
+    el.style.transition = 'none';
+    el.style.left = left + 'px';
+    el.style.top = top + 'px';
+    el.style.zIndex = ++zTop;
+    el.style.opacity = 1;
+    el.style.transform = `rotate(${rot}deg) scale(1.25)`;
+
+    // paper number
+    placedCount++;
+    const num = document.createElement('span');
+    num.className = 'num';
+    num.textContent = String(placedCount).padStart(2,'0');
+    el.appendChild(num);
+    countEl.textContent = String(placedCount).padStart(3,'0');
+
+    void el.offsetHeight; // reflow
+    el.style.transition = 'transform 300ms cubic-bezier(.34,1.56,.64,1)';
+    requestAnimationFrame(() => {
+      el.style.transform = `rotate(${rot}deg) scale(1)`;
+    });
+
+    el.removeEventListener('pointerdown', onPointerDown);
+
+    // advance the stack
+    queue.shift();
+    refillQueue();
+    redrawTray(true);
+    playPeelSound();
+  }
+
+  // ---- Reset ----
+  resetBtn.addEventListener('click', () => {
+    document.querySelectorAll('.placed').forEach(el => {
+      el.style.transition = 'opacity 220ms ease, transform 220ms ease';
+      el.style.opacity = 0;
+      el.style.transform += ' scale(0.85)';
+      setTimeout(() => el.remove(), 230);
+    });
+    placedCount = 0;
+    countEl.textContent = '000';
+  });
+
+  window.addEventListener('resize', () => {
+    computeTrayBase();
+    redrawTray(false);
+  });
+
+  initTray();
+})();
+</script>
+</body>
+</html>
